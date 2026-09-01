@@ -197,48 +197,143 @@ findGuideHits = function(countTable, curBinBounds, pseudocount=10, meanFunction 
     countTable[unsortedBin]=countTable[unsortedBin]+pseudocount;
   }
   curNormNBSummaries = countTable
-  countTable$libFraction = countTable[[unsortedBin]]/sum(countTable[[unsortedBin]],na.rm=TRUE)
   
   curNormNBSummaries$libFraction = curNormNBSummaries[[unsortedBin]]/sum(curNormNBSummaries[[unsortedBin]],na.rm=TRUE)
-  binCounts = apply(curNormNBSummaries[sortBins],2,function(x){sum(x, na.rm = TRUE)})
+  
+  # Initialize logging values
+  progressInterval = 10000
+  progressStart = proc.time()[["elapsed"]]
+  totalStart = progressStart
+  
+  # Initialize ouput arrays
+  nGuides = nrow(curNormNBSummaries)
+  guideMeans = numeric(nGuides)
+  guideLLs = numeric(nGuides)
+  
+  # Initialize numeric matrix
+  guideCountMatrix = as.matrix(curNormNBSummaries[, sortBins, drop=FALSE])
+  storage.mode(guideCountMatrix) = "double"
+  libFractions = curNormNBSummaries$libFraction
+  binCounts = colSums(guideCountMatrix, na.rm=TRUE)
   
   #for each guide, find the optimal mu given the count data and bin percentages
-  for (i in 1:nrow(curNormNBSummaries)){
+  message(paste("Performing Guide optimization for", nGuides, "guides"))
+  for (i in seq_len(nGuides)){
     curOptim=list()
+    guideCounts = guideCountMatrix[i, ]
+    guideLibFraction = libFractions[i]
+    
     #interval: The probability of observing a guide outside of this interval in one of the non-terminal bins is very unlikely, and so estimating a true mean for these is too difficult anyway. Besides, we get some local optima at the extremes for sparsely sampled data.
     tryCatch(
-      {curOptim = optim(0, fn = function(mu) { -getNBGaussianLikelihood(x = as.numeric(curNormNBSummaries[sortBins][i, ]), mu = mu, k = binCounts, nullModel = curBinBounds, libFract = curNormNBSummaries$libFraction[i]) }, method = "L-BFGS-B", lower = limits[1], upper = limits[2])},
+      {
+        curOptim = optim(
+          0,
+          fn = function(mu) {
+            -getNBGaussianLikelihood(
+              x = guideCounts,
+              mu = mu,
+              k = binCounts,
+              nullModel = curBinBounds,
+              libFract = guideLibFraction
+            )
+          },
+          method = "L-BFGS-B",
+          lower = limits[1],
+          upper = limits[2]
+        )
+      },
       error =function(e){
         message("Mu optimization returned NaN objective: restricting search space")
         uniformObjectiveEval = data.frame(mu = ((0:1000)/1000 - 1) * (limits[2] - limits[1]) + limits[2], ll = NA)
-        for (k in 1:nrow(uniformObjectiveEval)) {
-          uniformObjectiveEval$ll[k] = getNBGaussianLikelihood(x = as.numeric(curNormNBSummaries[sortBins][i, ]), mu = uniformObjectiveEval$mu[k], k = binCounts, nullModel = curBinBounds, libFract = curNormNBSummaries$libFraction[i])
+        for (k in seq_len(nrow(uniformObjectiveEval))) {
+          uniformObjectiveEval$ll[k] = getNBGaussianLikelihood(
+            x = guideCounts,
+            mu = uniformObjectiveEval$mu[k],
+            k = binCounts,
+            nullModel = curBinBounds,
+            libFract = guideLibFraction
+          )
         }
         uniformObjectiveEval = uniformObjectiveEval[!is.infinite(uniformObjectiveEval$ll), ]
         uniformObjectiveEval = uniformObjectiveEval[!is.nan(uniformObjectiveEval$ll), ]
-        stopifnot(nrow(uniformObjectiveEval) >= 1) # no points in the tested space have valid LLs
+        stopifnot(nrow(uniformObjectiveEval) >= 1)
         message(sprintf("New interval = c(%f, %f)", min(uniformObjectiveEval$mu), max(uniformObjectiveEval$mu)))
-        curOptim <<- optim(0, fn = function(mu) { -getNBGaussianLikelihood(x = as.numeric(curNormNBSummaries[sortBins][i, ]), mu = mu, k = binCounts, nullModel = curBinBounds, libFract = curNormNBSummaries$libFraction[i]) }, method = "L-BFGS-B", lower = min(uniformObjectiveEval$mu), upper = max(uniformObjectiveEval$mu))
+        curOptim <<- optim(
+          0,
+          fn = function(mu) {
+            -getNBGaussianLikelihood(
+              x = guideCounts,
+              mu = mu,
+              k = binCounts,
+              nullModel = curBinBounds,
+              libFract = guideLibFraction
+            )
+          },
+          method = "L-BFGS-B",
+          lower = min(uniformObjectiveEval$mu),
+          upper = max(uniformObjectiveEval$mu)
+        )
       }
     )
-    curNormNBSummaries$mean[i]=  curOptim$par
-    curNormNBSummaries$ll[i]  = -curOptim$value
+    guideMeans[i] = curOptim$par
+    guideLLs[i] = -curOptim$value
+    
+    if (i %% progressInterval == 0 || i == nrow(curNormNBSummaries)){
+      progressNow = proc.time()[["elapsed"]]
+      guidesInBlock = ifelse(i %% progressInterval == 0, progressInterval, i %% progressInterval)
+      message(sprintf(
+        "Processed %s/%s guides | last %s guides: %.2f seconds | total: %.2f seconds",
+        format(i, big.mark=","),
+        format(nrow(curNormNBSummaries), big.mark=","),
+        format(guidesInBlock, big.mark=","),
+        progressNow-progressStart,
+        progressNow-totalStart
+      ))
+      progressStart = progressNow
+    }
   }
+  
+  # Agregate arrays
+  curNormNBSummaries$mean = guideMeans
+  curNormNBSummaries$ll = guideLLs
+  
   if (sum(curNormNBSummaries[[negativeControl]]) == 0){
     warning(sprintf("Cannot calculate logliklihood ratio or Z score without non-targeting guides and %s indicates there are no such guides",negativeControl))
   }
   #recalculate LL ratio and calculate a Z score for the mean WRT the observed mean expression of the non-targeting (NT) guides
   muNT = meanFunction(curNormNBSummaries$mean[curNormNBSummaries[[negativeControl]]]) # mean of the non-targeting guides mean expressions
-  for (i in 1:nrow(curNormNBSummaries)){
-    curNormNBSummaries$llRatio[i]=curNormNBSummaries$ll[i] -getNBGaussianLikelihood(x=as.numeric(curNormNBSummaries[sortBins][i,]), mu=muNT, k=binCounts, nullModel=curBinBounds, libFract = curNormNBSummaries$libFraction[i])
-    if (!is.finite(curNormNBSummaries$llRatio[i])){
-      warning(sprintf("Got non-finite llRatio: %f; %f - %f", curNormNBSummaries$llRatio[i],curNormNBSummaries$ll[i] , getNBGaussianLikelihood(x=as.numeric(curNormNBSummaries[sortBins][i,]), mu=muNT, k=binCounts, nullModel=curBinBounds, libFract = curNormNBSummaries$libFraction[i])))
+  
+  # Initialize array
+  guideLLRatios = numeric(nGuides)
+  message("Finished guide optimization; calculating likelihood ratios")
+  for (i in seq_len(nGuides)){
+    nullLL = getNBGaussianLikelihood(
+      x = guideCountMatrix[i,],
+      mu = muNT,
+      k = binCounts,
+      nullModel = curBinBounds,
+      libFract = libFractions[i]
+    )
+    guideLLRatios[i] = guideLLs[i]-nullLL
+    
+    if (!is.finite(guideLLRatios[i])){
+      warning(sprintf(
+        "Got non-finite llRatio: %f; %f - %f",
+        guideLLRatios[i],
+        guideLLs[i],
+        nullLL
+      ))
     }
-    curNormNBSummaries$Z[i]=curNormNBSummaries$mean[i]-muNT
   }
+  
+  curNormNBSummaries$llRatio = guideLLRatios
+  curNormNBSummaries$Z = guideMeans-muNT
+  message("Finished calculating likelihood ratios")
   if (any(curNormNBSummaries$llRatio[!is.na(curNormNBSummaries$llRatio)]<0)){
     warning("Some log-likelihood ratios are negative! (i.e. optimized mu is less likely to mu=0)")
   }
+  
+  
   return(curNormNBSummaries)
 } 
 
@@ -620,7 +715,7 @@ getElementwiseStats = function(experiments, normNBSummaries, elementIDs, tails="
 #'                                     negativeControl="negControl")
 findGuideHitsAllScreens = function(experiments, countDataFrame, binStats, ...){
   if (!"Bin" %in% names(binStats)){
-    if (!"bin" %in% names(binStats)){
+    if ("bin" %in% names(binStats)){
       warning("'Bin' column not found in binStats; using 'bin' instead")
       binStats$Bin = binStats$bin;
     }else{
@@ -642,17 +737,17 @@ findGuideHitsAllScreens = function(experiments, countDataFrame, binStats, ...){
   }
   experiments[ncol(experiments)+1]=1:nrow(experiments);
   idCol = names(experiments)[ncol(experiments)];
-  countDataFrame = merge(countDataFrame, experiments, by=mergeBy);
-  binStats = merge(binStats, experiments, by=mergeBy);
+  countDataFrame = merge(countDataFrame, experiments, by=mergeBy, sort=FALSE)
+  binStats = merge(binStats, experiments, by=mergeBy, sort=FALSE)
   
-  allSummaries = data.frame()
-  for(j in 1:nrow(experiments)){
-    normNBSummaries = findGuideHits(
+  allSummaries = vector("list", nrow(experiments))
+  for(j in seq_len(nrow(experiments))){
+    allSummaries[[j]] = findGuideHits(
       countDataFrame[countDataFrame[[idCol]]==experiments[[idCol]][j],], 
       #makeBinModel(binStats[binStats[[idCol]]==experiments[[idCol]][j] , c("Bin","fraction")]), ...)
       binStats[binStats[[idCol]]==experiments[[idCol]][j] , ], ...)
-    allSummaries = rbind(allSummaries,normNBSummaries)
   }
+  allSummaries = do.call(rbind, allSummaries)
   allSummaries[[idCol]]=NULL;
   return(allSummaries);
 }
