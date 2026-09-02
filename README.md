@@ -1,6 +1,6 @@
 # MAUDE: Mean Alterations Using Discrete Expression
 
-WARNING: This is modified version of the [original MAUDE](https://github.com/de-Boer-Lab/MAUDE), which was optimized for large datasets of millions of guides per experiment. 
+WARNING: This is modified version of the [original MAUDE](https://github.com/de-Boer-Lab/MAUDE). This version has been optimized for large datasets with millions of guides per experiment. 
 
 [![DOI](https://zenodo.org/badge/135627989.svg)](https://zenodo.org/badge/latestdoi/135627989)
 
