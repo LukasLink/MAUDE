@@ -338,7 +338,6 @@ findGuideHits = function(countTable, curBinBounds, pseudocount=10, meanFunction 
 } 
 
 
-
 #' Calculate Z-score scaling factors using non-targeting guides
 #'
 #' Calculates scaling factors to calibrate  element-wise Z-scores by repeatedly calculating a set of "null" Z-scores by repeatedly sampling the given numbers of non-targeting guides per element. This function is not normally used directly.
@@ -371,12 +370,16 @@ findGuideHits = function(countTable, curBinBounds, pseudocount=10, meanFunction 
 #' @importFrom reshape cast
 getZScalesWithNTGuides = function(ntData, uGuidesPerElement, mergeBy, ntSampleFold=10){
   message(sprintf("Building background with %i non-targeting guides", nrow(ntData)))
-  ntData = ntData[sample(1:nrow(ntData), nrow(ntData)*ntSampleFold, replace=TRUE),]
+  ntData <- ntData[, c(mergeBy, "Z"), drop = FALSE] # Drop all columns we don't need to save on memory
+
+  ntData = ntData[sample.int(nrow(ntData), nrow(ntData)*ntSampleFold, replace=TRUE),]
   zScales = data.frame();
   for(i in uGuidesPerElement){
-    ntData = ntData[order(runif(nrow(ntData))),]
-    for(sortBy in mergeBy){ ntData = ntData[order(ntData[[sortBy]]),]} #sort by screen, then by random
-    ntData$groupID = floor((0:(nrow(ntData)-1))/i)
+    randomOrder = runif(nrow(ntData))
+    orderArgs = c(ntData[rev(mergeBy)], list(randomOrder))
+    ntData = ntData[do.call(order, orderArgs),]
+    rm(randomOrder, orderArgs)
+    ntData$groupID = (seq_len(nrow(ntData)) - 1L) %/% i
     #message(sprintf("Unique groups for %i guides per locus: %i", i, length(unique(ntData$groupID))))
     ntStats = as.data.frame(cast(ntData, as.formula(sprintf("%s + groupID ~ .", paste(mergeBy, collapse = " + "))), value="Z", fun.aggregate = function(x){return(list(numGuides = length(x), stoufferZ=combineZStouffer(x)))}))
     ntStats = ntStats[ntStats$numGuides==i,]
@@ -387,6 +390,8 @@ getZScalesWithNTGuides = function(ntData, uGuidesPerElement, mergeBy, ntSampleFo
   }
   return(zScales)
 }
+
+
 
 #' Find active elements by sliding window
 #'
