@@ -369,28 +369,104 @@ findGuideHits = function(countTable, curBinBounds, pseudocount=10, meanFunction 
 #' }
 #' @importFrom reshape cast
 getZScalesWithNTGuides = function(ntData, uGuidesPerElement, mergeBy, ntSampleFold=10){
-  message(sprintf("Building background with %i non-targeting guides", nrow(ntData)))
   ntData <- ntData[, c(mergeBy, "Z"), drop = FALSE] # Drop all columns we don't need to save on memory
-
-  ntData = ntData[sample.int(nrow(ntData), nrow(ntData)*ntSampleFold, replace=TRUE),]
+  
+  if (ntSampleFold==1){
+    message(sprintf("Building background with %i non-targeting guides, without bootstrapping", nrow(ntData)))
+  }else{
+    message(sprintf("Building background with %i non-targeting guides, bootstrapping NT guides %i times", nrow(ntData), ntSampleFold))
+    ntData = ntData[sample.int(nrow(ntData), nrow(ntData)*ntSampleFold, replace=TRUE),]
+  }
+  
+  # Pre-calculate row membership for each unique mergeBy combination
+  mergeGroup = interaction(ntData[mergeBy], drop=TRUE, lex.order=TRUE)
+  rowsByMergeGroup = split(seq_len(nrow(ntData)), mergeGroup)
+  rm(mergeGroup)
+  
   zScales = data.frame();
-  for(i in uGuidesPerElement){
-    randomOrder = runif(nrow(ntData))
-    orderArgs = c(ntData[rev(mergeBy)], list(randomOrder))
-    ntData = ntData[do.call(order, orderArgs),]
-    rm(randomOrder, orderArgs)
+  
+  # Progress tracking
+  totalIterations = length(uGuidesPerElement)
+  totalStart = Sys.time()
+  lastUpdate = totalStart
+  
+  for(iter in seq_along(uGuidesPerElement)){
+    i = uGuidesPerElement[iter]
+    iterStart = Sys.time()
+    
+    # Randomly shuffle guides within each mergeBy combination
+    randomOrder = unlist(lapply(rowsByMergeGroup, function(idx){idx[sample.int(length(idx))]}), use.names=FALSE)
+    ntData = ntData[randomOrder,,drop=FALSE]
+    rm(randomOrder)
+    
     ntData$groupID = (seq_len(nrow(ntData)) - 1L) %/% i
-    #message(sprintf("Unique groups for %i guides per locus: %i", i, length(unique(ntData$groupID))))
-    ntStats = as.data.frame(cast(ntData, as.formula(sprintf("%s + groupID ~ .", paste(mergeBy, collapse = " + "))), value="Z", fun.aggregate = function(x){return(list(numGuides = length(x), stoufferZ=combineZStouffer(x)))}))
-    ntStats = ntStats[ntStats$numGuides==i,]
+    
+    # Calculate Stouffer Z for each group using matrix operations
+    nCompleteGroups = nrow(ntData) %/% i
+    nUse = nCompleteGroups * i
+    zMat = matrix(ntData$Z[seq_len(nUse)], nrow=i, ncol=nCompleteGroups)
+    stoufferZ = colSums(zMat, na.rm=TRUE) / sqrt(colSums(!is.na(zMat)))
+    
+    # Remove groups crossing a mergeBy boundary
+    groupStarts = seq.int(1L, nUse, by=i)
+    groupEnds = groupStarts + i - 1L
+    completeGroup = rep(TRUE, nCompleteGroups)
+    for(m in mergeBy){
+      completeGroup = completeGroup & ntData[[m]][groupStarts] == ntData[[m]][groupEnds]
+    }
+    
+    ntStats = ntData[groupStarts[completeGroup], mergeBy, drop=FALSE]
+    ntStats$groupID = ntData$groupID[groupStarts[completeGroup]]
+    ntStats$numGuides = i
+    ntStats$stoufferZ = stoufferZ[completeGroup]
+    
+    rm(zMat, stoufferZ, groupStarts, groupEnds, completeGroup)
+    
     ntStats = as.data.frame(cast(ntStats, as.formula(sprintf("%s ~ .", paste(mergeBy, collapse = " + "))), value="stoufferZ",fun.aggregate = function(x){sd(x,na.rm=TRUE)}))
     names(ntStats)[ncol(ntStats)]="Zscale"
     ntStats$numGuides=i;
     zScales = rbind(zScales, ntStats)
+    
+    # Progress update for first 3 iterations, then every 30 minutes
+    iterEnd = Sys.time()
+    printUpdate = iter <= 3 || as.numeric(difftime(iterEnd, lastUpdate, units="mins")) >= 30
+    
+    if(printUpdate){
+      iterSeconds = as.numeric(difftime(iterEnd, iterStart, units="secs"))
+      elapsedSeconds = as.numeric(difftime(iterEnd, totalStart, units="secs"))
+      meanSeconds = elapsedSeconds / iter
+      remainingSeconds = meanSeconds * (totalIterations - iter)
+      estimatedEnd = iterEnd + remainingSeconds
+      
+      message(sprintf(
+        "  TOTAL:          %7.1f sec (%.2f min)",
+        iterSeconds,
+        iterSeconds / 60
+      ))
+      
+      message(sprintf(
+        "[%s] Finished %i/%i: %i guides/element | elapsed %.2f h | mean %.2f min/iteration | remaining %.1f h | ETA %s",
+        format(iterEnd, "%Y-%m-%d %H:%M:%S"),
+        iter,
+        totalIterations,
+        i,
+        elapsedSeconds / 3600,
+        meanSeconds / 60,
+        remainingSeconds / 3600,
+        format(estimatedEnd, "%Y-%m-%d %H:%M:%S")
+      ))
+      
+      lastUpdate = iterEnd
+    }
+    
+    if(iter == 3){
+      message("Progress updates will now be reported every 30 minutes.")
+      lastUpdate = iterEnd
+    }
   }
+  
   return(zScales)
 }
-
 
 
 #' Find active elements by sliding window
